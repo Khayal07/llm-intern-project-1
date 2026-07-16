@@ -1,5 +1,6 @@
 import os
-import time 
+import json
+import time
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -15,46 +16,82 @@ client = OpenAI(
     api_key=API_KEY
 )
 
-def run_llm_task_with_retry(user_prompt: str, max_retries: int = 3, initial_delay: int = 2):
+# Müştəri rəylərinin analizi üçün JSON çıxış gözləyən sistem promptu
+JSON_SYSTEM_PROMPT = """
+Sən müştəri rəylərini analiz edən köməkçisən. Sənə gələn rəyi analiz et və mütləq və mütləq aşağıdakı JSON formatında cavab qaytar. 
+JSON-dan kənar heç bir izah, giriş və ya yekun mətni yazma.
+
+Gözlənilən format:
+{
+  "sentiment": "müsbət" və ya "mənfi",
+  "reason_az": "analizin qısa izahı"
+}
+"""
+
+def analyze_review_and_validate(user_review: str):
     """
-    Sorğunu göndərən və xəta baş verdikdə Exponential Backoff
-    məntiqi ilə yenidən cəhd edən (Retry) funksiya.
+    Rəyi analiz edən, rəsmi OpenAI API vasitəsilə JSON formatında cavab alan,
+    onu təmizləyən və düzgünlüyünü valide edən funksiya.
     """
     messages = [
-        {"role": "system", "content": "Sən köməkçi bir botsan."},
-        {"role": "user", "content": user_prompt}
+        {"role": "system", "content": JSON_SYSTEM_PROMPT},
+        {"role": "user", "content": user_review}
     ]
     
-    delay = initial_delay
-    
-    for attempt in range(1, max_retries + 1):
-        try:
-            print(f"[Sistem] Sorğu göndərilir... (Cəhd {attempt}/{max_retries})")
+    try:
+        print("[Sistem] OpenAI-a sorğu göndərilir...")
+        
+        # response_format parametrini əlavə edirik ki, model mütləq JSON qaytarsın
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            response_format={"type": "json_object"},
+            timeout=15.0
+        )
+        
+        raw_output = response.choices[0].message.content
+        print(f"\n[Sistem] Modelin çiy cavabı (Raw Output):\n{raw_output}\n")
+        
+        # === VALIDASİYA VƏ PARSING MƏRHƏLƏSİ ===
+        # Modeldən gələn mətni təmizləyirik (sağdakı-soldakı boşluqlar və markdown-lar silinir)
+        cleaned_output = raw_output.strip()
+        if cleaned_output.startswith("```json"):
+            cleaned_output = cleaned_output[7:]
+        elif cleaned_output.startswith("```"):
+            cleaned_output = cleaned_output[3:]
             
-            response = client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=messages,
-                timeout=10.0 # Cavab gecikərsə gözləmə limiti
-            )
+        if cleaned_output.endswith("```"):
+            cleaned_output = cleaned_output[:-3]
             
-            # Əgər uğurlu olarsa cavabı dərhal qaytarırıq
-            return response.choices[0].message.content
-            
-        except Exception as e:
-            print(f"[Sistem Xətası] Qoşulma zamanı xəta baş verdi: {e}")
-            
-            if attempt < max_retries:
-                print(f"[Retry] {delay} saniyə gözlənilir və yenidən cəhd edilir...")
-                time.sleep(delay) 
-                delay *= 2  # Gözləmə müddətini eksponensial olaraq artırırıq (2s -> 4s -> 8s)
-            else:
-                print("[Sistem] Bütün cəhdlər uğursuz oldu.")
-                return f"Xəta: API-a qoşulmaq mümkün olmadı. Detal: {e}"
+        cleaned_output = cleaned_output.strip()
+        
+        # JSON-u parse etməyə çalışırıq
+        parsed_data = json.loads(cleaned_output)
+        
+        # Şema validasiyası: Lazımi açarların JSON daxilində olub-olmadığını yoxlayırıq
+        required_keys = ["sentiment", "reason_az"]
+        for key in required_keys:
+            if key not in parsed_data:
+                raise KeyError(f"JSON daxilində tələb olunan '{key}' açarı tapılmadı!")
+                
+        return parsed_data, True
+        
+    except json.JSONDecodeError as je:
+        print(f"[Xəta] Gələn məlumat düzgün JSON formatında deyil: {je}")
+        return None, False
+    except Exception as e:
+        print(f"[Xəta] Başqa bir problem yarandı: {e}")
+        return None, False
 
 if __name__ == "__main__":
-    test_prompt = "Azərbaycanın ən böyük gölü hansıdır?"
+    test_review = "Kuryer yeməyi çox gec gətirdi, həm də gələndə hər şey artıq buz kimi soyumuşdu."
     print("Sistem işə salınır...")
     
-    cavab = run_llm_task_with_retry(test_prompt)
-    print("\n--- Modelin Cavabı ---")
-    print(cavab)
+    parsed_json, is_valid = analyze_review_and_validate(test_review)
+    
+    if is_valid:
+        print("--- [UĞURLU] JSON Uğurla Parse və Valide Olundu! ---")
+        print(f"Sentiment: {parsed_json['sentiment']}")
+        print(f"İzah: {parsed_json['reason_az']}")
+    else:
+        print("--- [UĞURSUZ] Validasiya xətası baş verdi! ---")
