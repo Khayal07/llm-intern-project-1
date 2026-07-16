@@ -16,6 +16,24 @@ client = OpenAI(
     api_key=API_KEY
 )
 
+# === MODEL TARİFLƏRİ (Checkpoint 6 - 1 Milyon Token üçün USD ilə) ===
+MODEL_PRICING = {
+    "gpt-4o-mini": {"input": 0.150, "output": 0.600},
+    "gpt-4o": {"input": 2.500, "output": 10.000},
+    "default": {"input": 0.150, "output": 0.600}  # Model tapılmadıqda tətbiq olunan standart tarif
+}
+
+def calculate_cost(prompt_tokens: int, completion_tokens: int, model_name: str):
+    """
+    İstifadə olunan token miqdarına və modelə uyğun olaraq sorğunun real xərcini hesablayır.
+    """
+    # Əgər model_name yoxdursa və ya None-dırsa default tarif seçilir
+    pricing = MODEL_PRICING.get(model_name, MODEL_PRICING["default"])
+    
+    input_cost = (prompt_tokens / 1_000_000) * pricing["input"]
+    output_cost = (completion_tokens / 1_000_000) * pricing["output"]
+    return input_cost + output_cost
+
 # Müştəri rəylərinin analizi üçün JSON çıxış gözləyən sistem promptu
 JSON_SYSTEM_PROMPT = """
 Sən müştəri rəylərini analiz edən köməkçisən. Sənə gələn rəyi analiz et və mütləq və mütləq aşağıdakı JSON formatında cavab qaytar. 
@@ -31,7 +49,7 @@ Gözlənilən format:
 def analyze_review_and_validate(user_review: str):
     """
     Rəyi analiz edən, rəsmi OpenAI API vasitəsilə JSON formatında cavab alan,
-    onu təmizləyən və düzgünlüyünü valide edən funksiya.
+    onun token/xərc monitorinqini aparan, təmizləyən və düzgünlüyünü valide edən funksiya.
     """
     messages = [
         {"role": "system", "content": JSON_SYSTEM_PROMPT},
@@ -52,6 +70,24 @@ def analyze_review_and_validate(user_review: str):
         raw_output = response.choices[0].message.content
         print(f"\n[Sistem] Modelin çiy cavabı (Raw Output):\n{raw_output}\n")
         
+        # === MONITORİNQ VƏ TOKEN HESABLANMASI (Checkpoint 6) ===
+        usage = response.usage
+        if usage:
+            prompt_tokens = usage.prompt_tokens
+            completion_tokens = usage.completion_tokens
+            total_tokens = usage.total_tokens
+            cost = calculate_cost(prompt_tokens, completion_tokens, MODEL_NAME)
+            
+            print("--- [MONİTORİNQ: Token və Xərc] ---")
+            print(f"İstifadə edilən Model: {MODEL_NAME}")
+            print(f"Giriş (Prompt) Tokenləri: {prompt_tokens}")
+            print(f"Çıxış (Completion) Tokenləri: {completion_tokens}")
+            print(f"Ümumi Token Sayı: {total_tokens}")
+            print(f"Sorğunun Təxmini Xərci: ${cost:.6f} USD")
+            print("-----------------------------------\n")
+        else:
+            print("[Sistem/Xəbərdarlıq] Modelin istifadə (usage) məlumatları alınmadı.\n")
+
         # === VALIDASİYA VƏ PARSING MƏRHƏLƏSİ ===
         # Modeldən gələn mətni təmizləyirik (sağdakı-soldakı boşluqlar və markdown-lar silinir)
         cleaned_output = raw_output.strip()
