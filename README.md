@@ -53,13 +53,10 @@ python main.py
 Sistemin işləməsi zamanı konsolda yaranan real sorğu, cavab, token monitorinqi və uğurlu JSON validasiya loqları aşağıdakı kimidir:
 ```
 Sistem işə salınır...
-[Sistem] OpenAI-a sorğu göndərilir...
+[Sistem] OpenRouter-a sorğu göndərilir (streaming)...
 
-[Sistem] Modelin çiy cavabı (Raw Output):
-{
-  "sentiment": "mənfi",
-  "reason_az": "Müştəri yeməyin gecikməsindən və soyuq gəlməsindən narazıdır."
-}
+[Sistem] Modelin cavabı (real-time streaming):
+{"sentiment": "mənfi", "reason_az": "Müştəri yeməyin gecikməsindən və soyuq gəlməsindən narazıdır."}
 
 --- [MONİTORİNQ: Token və Xərc] ---
 İstifadə edilən Model: openai/gpt-4o-mini

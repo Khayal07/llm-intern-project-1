@@ -112,21 +112,37 @@ def analyze_review_and_validate(user_review: str):
     messages.append({"role": "user", "content": wrap_review(user_review)})
     
     try:
-        print("[Sistem] OpenAI-a sorğu göndərilir...")
-        
-        # response_format parametrini əlavə edirik ki, model mütləq JSON qaytarsın
-        response = client.chat.completions.create(
+        print("[Sistem] OpenRouter-a sorğu göndərilir (streaming)...")
+
+        # === STREAMING SORĞU (Checkpoint 3) ===
+        # stream=True ilə cavab hissə-hissə (chunk) gəlir; response_format model çıxışını JSON-a
+        # məcbur edir; stream_options isə axının sonunda token istifadəsini (usage) qaytarır.
+        stream = client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
             response_format={"type": "json_object"},
+            stream=True,
+            stream_options={"include_usage": True},
             timeout=15.0
         )
-        
-        raw_output = response.choices[0].message.content
-        print(f"\n[Sistem] Modelin çiy cavabı (Raw Output):\n{raw_output}\n")
-        
+
+        # Chunk-ları emal edən dövr: hər hissəni real vaxtda çap edir və tam cavaba yığırıq
+        print("\n[Sistem] Modelin cavabı (real-time streaming):")
+        raw_output = ""
+        usage = None
+        for chunk in stream:
+            # Axının son chunk-ında adətən token istifadəsi (usage) gəlir
+            if getattr(chunk, "usage", None):
+                usage = chunk.usage
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta.content
+            if delta:
+                print(delta, end="", flush=True)  # incremental (token-token) göstərmə
+                raw_output += delta
+        print("\n")  # axın bitdikdən sonra sətir keçirik
+
         # === MONITORİNQ VƏ TOKEN HESABLANMASI (Checkpoint 6) ===
-        usage = response.usage
         if usage:
             prompt_tokens = usage.prompt_tokens
             completion_tokens = usage.completion_tokens
