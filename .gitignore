@@ -6,3 +6,6 @@ env/
 
 __pycache__/
 *.py[cod]
+
+# Token/xərc monitorinq logları (Checkpoint 6)
+*.log

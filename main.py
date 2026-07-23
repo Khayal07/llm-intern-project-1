@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import logging
 from dotenv import load_dotenv
 from openai import (
     OpenAI,
@@ -35,6 +36,18 @@ client = OpenAI(
     base_url=BASE_URL,
 )
 
+# === LOGLAMA KONFİQURASİYASI (Checkpoint 6 - token/xərc loglanması) ===
+# Hər sorğunun token istifadəsi və xərci yalnız konsola deyil, daimi log faylına da
+# yazılır. Bu, istehsalat (production) mühitində maliyyə/performans monitorinqi üçün
+# audit izi (audit trail) yaradır — konsol çıxışı isə ötəri olduğundan itir.
+USAGE_LOG_FILE = os.getenv("USAGE_LOG_FILE", "usage.log")
+usage_logger = logging.getLogger("usage_monitor")
+usage_logger.setLevel(logging.INFO)
+if not usage_logger.handlers:  # modul təkrar import olunduqda əlavə handler yaranmasının qarşısını alır
+    _file_handler = logging.FileHandler(USAGE_LOG_FILE, encoding="utf-8")
+    _file_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+    usage_logger.addHandler(_file_handler)
+
 # === RETRY KONFİQURASİYASI (Checkpoint 4 - Xəta idarəetməsi) ===
 MAX_RETRIES = 3          # müvəqqəti xətalarda maksimum təkrar cəhd sayı
 BASE_RETRY_DELAY = 1.0   # eksponensial backoff üçün başlanğıc gözləmə (saniyə)
@@ -49,14 +62,21 @@ MODEL_PRICING = {
 def calculate_cost(prompt_tokens: int, completion_tokens: int, model_name: str):
     """
     İstifadə olunan token miqdarına və modelə uyğun olaraq sorğunun real xərcini hesablayır.
+
+    (cost, is_estimated) qaytarır: model tarifi cədvəldə tapılmadıqda standart tarif
+    tətbiq olunur və is_estimated=True olur — bu halda xərc yalnız TƏXMİNİDİR və
+    çağıran tərəf istifadəçini xəbərdar etməlidir (Checkpoint 6 dəqiqlik düzəlişi).
     """
     # OpenRouter model adları "provider/model" formatındadır; tarif üçün yalnız model adını götürürük
     normalized_name = (model_name or "").split("/")[-1]
-    pricing = MODEL_PRICING.get(normalized_name, MODEL_PRICING["default"])
-    
+    pricing = MODEL_PRICING.get(normalized_name)
+    is_estimated = pricing is None  # model cədvəldə yoxdur → standart tariflə təxmin edilir
+    if pricing is None:
+        pricing = MODEL_PRICING["default"]
+
     input_cost = (prompt_tokens / 1_000_000) * pricing["input"]
     output_cost = (completion_tokens / 1_000_000) * pricing["output"]
-    return input_cost + output_cost
+    return input_cost + output_cost, is_estimated
 
 # Müştəri rəylərinin analizi üçün JSON çıxış gözləyən sistem promptu (Checkpoint 2)
 JSON_SYSTEM_PROMPT = """
@@ -261,17 +281,33 @@ def analyze_review_and_validate(user_review: str):
             prompt_tokens = usage.prompt_tokens
             completion_tokens = usage.completion_tokens
             total_tokens = usage.total_tokens
-            cost = calculate_cost(prompt_tokens, completion_tokens, MODEL_NAME)
+            cost, is_estimated = calculate_cost(prompt_tokens, completion_tokens, MODEL_NAME)
 
             print("--- [MONİTORİNQ: Token və Xərc] ---")
             print(f"İstifadə edilən Model: {MODEL_NAME}")
             print(f"Giriş (Prompt) Tokenləri: {prompt_tokens}")
             print(f"Çıxış (Completion) Tokenləri: {completion_tokens}")
             print(f"Ümumi Token Sayı: {total_tokens}")
-            print(f"Sorğunun Təxmini Xərci: ${cost:.6f} USD")
+            if is_estimated:
+                # Model tarif cədvəlində yoxdur: xərc standart tariflə hesablanıb və DƏQİQ deyil
+                print(f"Sorğunun Xərci: ~${cost:.6f} USD  (TƏXMİNİ)")
+                print(f"[Xəbərdarlıq] '{MODEL_NAME}' üçün dəqiq tarif tapılmadı; standart "
+                      f"(gpt-4o-mini) tarifi tətbiq olundu. Dəqiq xərc üçün bu modeli "
+                      f"MODEL_PRICING cədvəlinə əlavə edin.")
+            else:
+                print(f"Sorğunun Xərci: ${cost:.6f} USD")
             print("-----------------------------------\n")
+
+            # Konsola əlavə olaraq daimi log faylına da yazılır (Checkpoint 6 - şəffaflıq/audit izi)
+            usage_logger.info(
+                "model=%s prompt_tokens=%d completion_tokens=%d total_tokens=%d "
+                "cost_usd=%.6f pricing=%s",
+                MODEL_NAME, prompt_tokens, completion_tokens, total_tokens,
+                cost, "estimated_default" if is_estimated else "exact",
+            )
         else:
             print("[Sistem/Xəbərdarlıq] Modelin istifadə (usage) məlumatları alınmadı.\n")
+            usage_logger.warning("model=%s usage_unavailable=true", MODEL_NAME)
 
         # === PARSING VƏ STRICT SCHEMA VALIDASIYASI (Checkpoint 5) ===
         try:
