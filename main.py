@@ -6,14 +6,24 @@ from openai import OpenAI
 
 load_dotenv()
 
-API_KEY = os.getenv("OPENAI_API_KEY")
-MODEL_NAME = os.getenv("LLM_MODEL_NAME")
+# === API KONFİQURASİYASI (Checkpoint 1 - API inteqrasiyası) ===
+# Layihə API provayderi olaraq OpenRouter platformasından istifadə edir.
+# Açar və endpoint (base_url) ətraf mühit dəyişənləri vasitəsilə təhlükəsiz oxunur.
+API_KEY = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
+BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+
+# LLM_MODEL_NAME yoxlanılır; dəyər verilmədikdə təhlükəsiz standart model seçilir
+MODEL_NAME = os.getenv("LLM_MODEL_NAME") or "openai/gpt-4o-mini"
 
 if not API_KEY:
-    raise ValueError("XƏTA: .env faylında OPENAI_API_KEY tapılmadı!")
+    raise ValueError(
+        "XƏTA: .env faylında OPENROUTER_API_KEY (və ya OPENAI_API_KEY) tapılmadı!"
+    )
 
+# OpenAI SDK OpenRouter endpoint-inə (base_url) yönləndirilir
 client = OpenAI(
-    api_key=API_KEY
+    api_key=API_KEY,
+    base_url=BASE_URL,
 )
 
 # === MODEL TARİFLƏRİ (Checkpoint 6 - 1 Milyon Token üçün USD ilə) ===
@@ -27,8 +37,9 @@ def calculate_cost(prompt_tokens: int, completion_tokens: int, model_name: str):
     """
     İstifadə olunan token miqdarına və modelə uyğun olaraq sorğunun real xərcini hesablayır.
     """
-    # Əgər model_name yoxdursa və ya None-dırsa default tarif seçilir
-    pricing = MODEL_PRICING.get(model_name, MODEL_PRICING["default"])
+    # OpenRouter model adları "provider/model" formatındadır; tarif üçün yalnız model adını götürürük
+    normalized_name = (model_name or "").split("/")[-1]
+    pricing = MODEL_PRICING.get(normalized_name, MODEL_PRICING["default"])
     
     input_cost = (prompt_tokens / 1_000_000) * pricing["input"]
     output_cost = (completion_tokens / 1_000_000) * pricing["output"]

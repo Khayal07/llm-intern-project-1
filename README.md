@@ -38,8 +38,9 @@ cp .env.example .env
 ```
 Sonra .env faylını açın və müvafiq məlumatları qeyd edin:
 ```python
-OPENAI_API_KEY=sk-proj-sizin-heqiqi-api-acariniz
-LLM_MODEL_NAME=gpt-4o-mini
+OPENROUTER_API_KEY=sk-or-sizin-heqiqi-openrouter-acariniz
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+LLM_MODEL_NAME=openai/gpt-4o-mini
 ```
 
 ### 💻 Proqramın İşə Salınması
@@ -61,7 +62,7 @@ Sistem işə salınır...
 }
 
 --- [MONİTORİNQ: Token və Xərc] ---
-İstifadə edilən Model: gpt-4o-mini
+İstifadə edilən Model: openai/gpt-4o-mini
 Giriş (Prompt) Tokenləri: 124
 Çıxış (Completion) Tokenləri: 38
 Ümumi Token Sayı: 162
