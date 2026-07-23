@@ -112,6 +112,58 @@ FEW_SHOT_EXAMPLES = [
     ),
 ]
 
+# === STRICT SCHEMA VALIDASIYA PARAMETRLƏRİ (Checkpoint 5) ===
+REQUIRED_KEYS = {"sentiment", "reason_az"}
+ALLOWED_SENTIMENTS = {"müsbət", "mənfi", "neytral", "qarışıq", "qeyri-müəyyən", "əlaqəsiz"}
+MAX_JSON_CORRECTION_RETRIES = 2  # yararsız JSON gəldikdə modeldən düzəliş üçün maksimum cəhd
+
+
+def extract_json_object(raw_text: str) -> str:
+    """
+    Mətndən JSON obyektini etibarlı çıxarır (Checkpoint 5): markdown fence-lərdən və ya
+    izahedici mətndən asılı olmayaraq ilk '{' ilə son '}' arasındakı hissəni götürür.
+    """
+    start = raw_text.find("{")
+    end = raw_text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        # JSON obyekti tapılmadı; təmizlənmiş mətni qaytarırıq (json.loads xəta qaldıracaq)
+        return raw_text.strip()
+    return raw_text[start:end + 1].strip()
+
+
+def validate_schema(parsed_data):
+    """
+    Ciddi (strict) şema validasiyası (Checkpoint 5). Uyğunsuzluqda ValueError qaldırır:
+    - cavab mütləq JSON obyekti (dict) olmalıdır
+    - yalnız icazə verilən açarlar olmalıdır (əskik və ya artıq açar qəbul edilmir)
+    - sentiment: boş olmayan mətn və icazəli enum dəyərlərindən biri
+    - reason_az: boş olmayan mətn
+    """
+    if not isinstance(parsed_data, dict):
+        raise ValueError("Cavab JSON obyekti (dict) deyil.")
+
+    keys = set(parsed_data.keys())
+    missing = REQUIRED_KEYS - keys
+    if missing:
+        raise ValueError(f"Tələb olunan açar(lar) yoxdur: {', '.join(sorted(missing))}")
+    extra = keys - REQUIRED_KEYS
+    if extra:
+        raise ValueError(f"Gözlənilməyən əlavə açar(lar): {', '.join(sorted(extra))}")
+
+    sentiment = parsed_data["sentiment"]
+    if not isinstance(sentiment, str) or not sentiment.strip():
+        raise ValueError("'sentiment' boş olmayan mətn olmalıdır.")
+    if sentiment not in ALLOWED_SENTIMENTS:
+        raise ValueError(
+            f"'sentiment' icazəli dəyər deyil: '{sentiment}'. "
+            f"İcazəlilər: {', '.join(sorted(ALLOWED_SENTIMENTS))}"
+        )
+
+    reason = parsed_data["reason_az"]
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("'reason_az' boş olmayan mətn olmalıdır.")
+
+
 def stream_completion_with_retry(messages):
     """
     Streaming sorğunu icra edir və müvəqqəti xətalarda (rate limit, timeout, bağlantı,
@@ -184,31 +236,33 @@ def analyze_review_and_validate(user_review: str):
         messages.append({"role": "assistant", "content": json.dumps(example_answer, ensure_ascii=False)})
     messages.append({"role": "user", "content": wrap_review(user_review)})
 
-    # === SORĞU + XƏTA İDARƏETMƏSİ (Checkpoint 4) ===
-    try:
-        print("[Sistem] OpenRouter-a sorğu göndərilir (streaming)...")
-        raw_output, usage = stream_completion_with_retry(messages)
-    except AuthenticationError as e:
-        print(f"[Xəta] Autentifikasiya uğursuz oldu — .env-dəki API açarını yoxlayın (401). Detal: {e}")
-        return None, False
-    except BadRequestError as e:
-        print(f"[Xəta] Yanlış sorğu (400) — model adı və ya parametrləri yoxlayın. Detal: {e}")
-        return None, False
-    except APIError as e:
-        print(f"[Xəta] API xətası ({type(e).__name__}): {e}")
-        return None, False
-    except RuntimeError as e:
-        print(f"[Xəta] {e}")
-        return None, False
+    print("[Sistem] OpenRouter-a sorğu göndərilir (streaming)...")
 
-    try:
+    # Validasiyadan keçməyən JSON gəldikdə modeldən düzəliş istənir (corrective retry - Checkpoint 5)
+    for correction_attempt in range(MAX_JSON_CORRECTION_RETRIES + 1):
+        # === SORĞU + XƏTA İDARƏETMƏSİ (Checkpoint 4) ===
+        try:
+            raw_output, usage = stream_completion_with_retry(messages)
+        except AuthenticationError as e:
+            print(f"[Xəta] Autentifikasiya uğursuz oldu — .env-dəki API açarını yoxlayın (401). Detal: {e}")
+            return None, False
+        except BadRequestError as e:
+            print(f"[Xəta] Yanlış sorğu (400) — model adı və ya parametrləri yoxlayın. Detal: {e}")
+            return None, False
+        except APIError as e:
+            print(f"[Xəta] API xətası ({type(e).__name__}): {e}")
+            return None, False
+        except RuntimeError as e:
+            print(f"[Xəta] {e}")
+            return None, False
+
         # === MONITORİNQ VƏ TOKEN HESABLANMASI (Checkpoint 6) ===
         if usage:
             prompt_tokens = usage.prompt_tokens
             completion_tokens = usage.completion_tokens
             total_tokens = usage.total_tokens
             cost = calculate_cost(prompt_tokens, completion_tokens, MODEL_NAME)
-            
+
             print("--- [MONİTORİNQ: Token və Xərc] ---")
             print(f"İstifadə edilən Model: {MODEL_NAME}")
             print(f"Giriş (Prompt) Tokenləri: {prompt_tokens}")
@@ -219,36 +273,34 @@ def analyze_review_and_validate(user_review: str):
         else:
             print("[Sistem/Xəbərdarlıq] Modelin istifadə (usage) məlumatları alınmadı.\n")
 
-        # === VALIDASİYA VƏ PARSING MƏRHƏLƏSİ ===
-        # Modeldən gələn mətni təmizləyirik (sağdakı-soldakı boşluqlar və markdown-lar silinir)
-        cleaned_output = raw_output.strip()
-        if cleaned_output.startswith("```json"):
-            cleaned_output = cleaned_output[7:]
-        elif cleaned_output.startswith("```"):
-            cleaned_output = cleaned_output[3:]
-            
-        if cleaned_output.endswith("```"):
-            cleaned_output = cleaned_output[:-3]
-            
-        cleaned_output = cleaned_output.strip()
-        
-        # JSON-u parse etməyə çalışırıq
-        parsed_data = json.loads(cleaned_output)
-        
-        # Şema validasiyası: Lazımi açarların JSON daxilində olub-olmadığını yoxlayırıq
-        required_keys = ["sentiment", "reason_az"]
-        for key in required_keys:
-            if key not in parsed_data:
-                raise KeyError(f"JSON daxilində tələb olunan '{key}' açarı tapılmadı!")
-                
-        return parsed_data, True
-        
-    except json.JSONDecodeError as je:
-        print(f"[Xəta] Gələn məlumat düzgün JSON formatında deyil: {je}")
-        return None, False
-    except KeyError as ke:
-        print(f"[Xəta] JSON şeması tələb olunan açarı ehtiva etmir: {ke}")
-        return None, False
+        # === PARSING VƏ STRICT SCHEMA VALIDASIYASI (Checkpoint 5) ===
+        try:
+            # İzahedici mətn/markdown olsa belə JSON obyektini etibarlı çıxarırıq
+            cleaned_output = extract_json_object(raw_output)
+            parsed_data = json.loads(cleaned_output)
+            validate_schema(parsed_data)  # tip, boş dəyər, enum və artıq açar yoxlanışı
+            return parsed_data, True
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"[Xəta] Çıxış validasiyadan keçmədi: {e}")
+            if correction_attempt >= MAX_JSON_CORRECTION_RETRIES:
+                break
+            # Modeldən düzəldici cavab istəyirik
+            print(f"[Sistem] Modeldən düzəliş istənilir "
+                  f"({correction_attempt + 1}/{MAX_JSON_CORRECTION_RETRIES})...\n")
+            messages.append({"role": "assistant", "content": raw_output})
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"Əvvəlki cavab tələb olunan formata uyğun deyil. Səbəb: {e}. "
+                    "Zəhmət olmasa YALNIZ düzgün JSON obyekti qaytar — əlavə mətn, izah "
+                    "və ya markdown olmadan. Yalnız \"sentiment\" və \"reason_az\" açarları "
+                    "olmalıdır; \"sentiment\" bu dəyərlərdən biri olmalıdır: "
+                    f"{', '.join(sorted(ALLOWED_SENTIMENTS))}."
+                ),
+            })
+
+    print("--- [UĞURSUZ] Düzəliş cəhdlərindən sonra da etibarlı JSON alınmadı! ---")
+    return None, False
 
 if __name__ == "__main__":
     test_review = "Kuryer yeməyi çox gec gətirdi, həm də gələndə hər şey artıq buz kimi soyumuşdu."
