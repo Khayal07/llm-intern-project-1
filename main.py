@@ -2,7 +2,16 @@ import os
 import json
 import time
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import (
+    OpenAI,
+    APIError,
+    APIConnectionError,
+    APITimeoutError,
+    RateLimitError,
+    InternalServerError,
+    AuthenticationError,
+    BadRequestError,
+)
 
 load_dotenv()
 
@@ -25,6 +34,10 @@ client = OpenAI(
     api_key=API_KEY,
     base_url=BASE_URL,
 )
+
+# === RETRY KONFİQURASİYASI (Checkpoint 4 - Xəta idarəetməsi) ===
+MAX_RETRIES = 3          # müvəqqəti xətalarda maksimum təkrar cəhd sayı
+BASE_RETRY_DELAY = 1.0   # eksponensial backoff üçün başlanğıc gözləmə (saniyə)
 
 # === MODEL TARİFLƏRİ (Checkpoint 6 - 1 Milyon Token üçün USD ilə) ===
 MODEL_PRICING = {
@@ -99,6 +112,66 @@ FEW_SHOT_EXAMPLES = [
     ),
 ]
 
+def stream_completion_with_retry(messages):
+    """
+    Streaming sorğunu icra edir və müvəqqəti xətalarda (rate limit, timeout, bağlantı,
+    server xətası) eksponensial backoff ilə yenidən cəhd edir (Checkpoint 4).
+
+    Uğurlu olduqda (raw_output, usage) qaytarır. Retry ilə həll olunmayan xətaları
+    (autentifikasiya, yanlış sorğu və s.) çağıran funksiyaya ötürür.
+    """
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            # === STREAMING SORĞU (Checkpoint 3) ===
+            # stream=True ilə cavab hissə-hissə (chunk) gəlir; response_format model çıxışını
+            # JSON-a məcbur edir; stream_options axının sonunda token istifadəsini qaytarır.
+            stream = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages,
+                response_format={"type": "json_object"},
+                stream=True,
+                stream_options={"include_usage": True},
+                timeout=15.0
+            )
+
+            # Chunk-ları emal edən dövr: hər hissəni real vaxtda çap edir və tam cavaba yığırıq
+            print("\n[Sistem] Modelin cavabı (real-time streaming):")
+            raw_output = ""
+            usage = None
+            for chunk in stream:
+                # Axının son chunk-ında adətən token istifadəsi (usage) gəlir
+                if getattr(chunk, "usage", None):
+                    usage = chunk.usage
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    print(delta, end="", flush=True)  # incremental (token-token) göstərmə
+                    raw_output += delta
+            print("\n")  # axın bitdikdən sonra sətir keçirik
+            return raw_output, usage
+
+        # === MÜVƏQQƏTİ XƏTALAR: eksponensial backoff ilə yenidən cəhd (Checkpoint 4) ===
+        except RateLimitError:
+            reason = "Sorğu limiti aşıldı (rate limit / 429)"
+        except APITimeoutError:
+            reason = "Sorğu vaxtı bitdi (timeout)"
+        except APIConnectionError:
+            reason = "Serverə bağlantı alınmadı (connection error)"
+        except InternalServerError:
+            reason = "Serverdə müvəqqəti xəta (5xx)"
+        else:
+            reason = None
+
+        # Bura yalnız müvəqqəti xəta baş verdikdə çatırıq
+        if attempt >= MAX_RETRIES:
+            raise RuntimeError(f"{MAX_RETRIES} təkrar cəhddən sonra da uğursuz oldu: {reason}")
+        delay = BASE_RETRY_DELAY * (2 ** attempt)  # eksponensial backoff: 1s, 2s, 4s...
+        print(f"[Xəbərdarlıq] {reason}. {delay:.1f} san sonra yenidən cəhd "
+              f"({attempt + 1}/{MAX_RETRIES})...")
+        time.sleep(delay)
+
+
 def analyze_review_and_validate(user_review: str):
     """
     Rəyi analiz edən, OpenRouter API vasitəsilə JSON formatında cavab alan,
@@ -110,38 +183,25 @@ def analyze_review_and_validate(user_review: str):
         messages.append({"role": "user", "content": wrap_review(example_review)})
         messages.append({"role": "assistant", "content": json.dumps(example_answer, ensure_ascii=False)})
     messages.append({"role": "user", "content": wrap_review(user_review)})
-    
+
+    # === SORĞU + XƏTA İDARƏETMƏSİ (Checkpoint 4) ===
     try:
         print("[Sistem] OpenRouter-a sorğu göndərilir (streaming)...")
+        raw_output, usage = stream_completion_with_retry(messages)
+    except AuthenticationError as e:
+        print(f"[Xəta] Autentifikasiya uğursuz oldu — .env-dəki API açarını yoxlayın (401). Detal: {e}")
+        return None, False
+    except BadRequestError as e:
+        print(f"[Xəta] Yanlış sorğu (400) — model adı və ya parametrləri yoxlayın. Detal: {e}")
+        return None, False
+    except APIError as e:
+        print(f"[Xəta] API xətası ({type(e).__name__}): {e}")
+        return None, False
+    except RuntimeError as e:
+        print(f"[Xəta] {e}")
+        return None, False
 
-        # === STREAMING SORĞU (Checkpoint 3) ===
-        # stream=True ilə cavab hissə-hissə (chunk) gəlir; response_format model çıxışını JSON-a
-        # məcbur edir; stream_options isə axının sonunda token istifadəsini (usage) qaytarır.
-        stream = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            response_format={"type": "json_object"},
-            stream=True,
-            stream_options={"include_usage": True},
-            timeout=15.0
-        )
-
-        # Chunk-ları emal edən dövr: hər hissəni real vaxtda çap edir və tam cavaba yığırıq
-        print("\n[Sistem] Modelin cavabı (real-time streaming):")
-        raw_output = ""
-        usage = None
-        for chunk in stream:
-            # Axının son chunk-ında adətən token istifadəsi (usage) gəlir
-            if getattr(chunk, "usage", None):
-                usage = chunk.usage
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta.content
-            if delta:
-                print(delta, end="", flush=True)  # incremental (token-token) göstərmə
-                raw_output += delta
-        print("\n")  # axın bitdikdən sonra sətir keçirik
-
+    try:
         # === MONITORİNQ VƏ TOKEN HESABLANMASI (Checkpoint 6) ===
         if usage:
             prompt_tokens = usage.prompt_tokens
@@ -186,8 +246,8 @@ def analyze_review_and_validate(user_review: str):
     except json.JSONDecodeError as je:
         print(f"[Xəta] Gələn məlumat düzgün JSON formatında deyil: {je}")
         return None, False
-    except Exception as e:
-        print(f"[Xəta] Başqa bir problem yarandı: {e}")
+    except KeyError as ke:
+        print(f"[Xəta] JSON şeması tələb olunan açarı ehtiva etmir: {ke}")
         return None, False
 
 if __name__ == "__main__":
